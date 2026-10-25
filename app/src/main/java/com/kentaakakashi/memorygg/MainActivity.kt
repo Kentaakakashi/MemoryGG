@@ -9,11 +9,9 @@ import android.widget.TextView
 import android.graphics.Color
 import android.view.ViewGroup
 import rikka.shizuku.Shizuku
-import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
     private lateinit var output: TextView
-    private val executor = Executors.newSingleThreadExecutor()
 
     private val permissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
         if (requestCode == SHIZUKU_REQUEST_CODE) {
@@ -105,22 +103,10 @@ class MainActivity : Activity() {
             return
         }
         append("Shizuku: CONNECTED; permission granted.")
-        executor.execute {
-            try {
-                val process = Shizuku.newProcess(arrayOf("sh", "-c", "id; echo ---; cat /proc/self/attr/current 2>/dev/null"), null, null)
-                val stdout = process.inputStream.bufferedReader().use { it.readText() }
-                val stderr = process.errorStream.bufferedReader().use { it.readText() }
-                val exit = process.waitFor()
-                runOnUiThread {
-                    append("Shell diagnostic exit code: $exit")
-                    append("Shell identity / SELinux context:\n${stdout.ifBlank { "(no stdout)" }}")
-                    if (stderr.isNotBlank()) append("stderr:\n$stderr")
-                    append("Interpretation: this describes the Shizuku-launched shell, not permission to access arbitrary game RAM.")
-                }
-            } catch (t: Throwable) {
-                runOnUiThread { append("Shizuku process test failed: ${t.javaClass.simpleName}: ${t.message}") }
-            }
-        }
+        append("Shizuku binder and permission checks passed.")
+        append("Shell execution is not tested in this build: Shizuku newProcess is private in the installed public API.")
+        append("Next step: configure a Shizuku UserService for a supported shell diagnostic.")
+        append("Important: Shizuku permission alone does not prove arbitrary third-party process memory access.")
     }
 
     private fun append(line: String) {
@@ -130,7 +116,6 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         Shizuku.removeRequestPermissionResultListener(permissionListener)
-        executor.shutdownNow()
         super.onDestroy()
     }
 
