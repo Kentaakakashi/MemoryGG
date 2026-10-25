@@ -31,6 +31,7 @@ class MainActivity : Activity() {
     private lateinit var conditionSpinner: Spinner
     private lateinit var status: TextView
     private lateinit var diagnostics: TextView
+    private lateinit var demoValue: TextView
     private lateinit var results: LinearLayout
     private lateinit var firstButton: Button
     private lateinit var nextButton: Button
@@ -133,6 +134,37 @@ class MainActivity : Activity() {
             setTextColor(Color.WHITE)
             setHintTextColor(Color.GRAY)
         }
+        val demoRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            demoValue = TextView(this@MainActivity).apply {
+                text = "Test value: " + nativeGetTestValue()
+                textSize = 13f
+                setTextColor(Color.rgb(140, 220, 175))
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(4, 0, 4, 0)
+            }
+            addView(demoValue, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.2f))
+            addView(Button(this@MainActivity).apply {
+                text = "−1"
+                setOnClickListener { adjustTestValue(-1) }
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.45f))
+            addView(Button(this@MainActivity).apply {
+                text = "+1"
+                setOnClickListener { adjustTestValue(1) }
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.45f))
+            addView(Button(this@MainActivity).apply {
+                text = "Reset"
+                setOnClickListener {
+                    nativeSetTestValue(12345)
+                    demoValue.text = "Test value: 12345"
+                    status.text = "Test fixture reset to 12345. Select Int32 and use First Scan."
+                }
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.7f))
+            addView(Button(this@MainActivity).apply {
+                text = "Use"
+                setOnClickListener { scanValue.setText(nativeGetTestValue().toString()) }
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.45f))
+        }
         val scanRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             addView(scanValue, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f))
@@ -176,6 +208,7 @@ class MainActivity : Activity() {
             setPadding(0, 8, 0, 4)
         }
         val scroll = ScrollView(this).apply { addView(results) }
+        root.addView(demoRow)
         root.addView(selectRow)
         root.addView(scanRow)
         root.addView(actionRow)
@@ -184,6 +217,14 @@ class MainActivity : Activity() {
         root.addView(diagnostics, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         setContentView(root)
         refreshShizukuState()
+    }
+
+    private fun adjustTestValue(delta: Int) {
+        val next = (nativeGetTestValue().toLong() + delta)
+            .coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt()
+        nativeSetTestValue(next)
+        demoValue.text = "Test value: " + next
+        status.text = "Test fixture is now " + next + ". Use Next Scan with Increased/Decreased/Changed to refine matches."
     }
 
     private fun startScan(first: Boolean) {
@@ -389,6 +430,8 @@ class MainActivity : Activity() {
     }
 
     private external fun nativeSelfTest(): String
+    private external fun nativeGetTestValue(): Int
+    private external fun nativeSetTestValue(value: Int): Int
     private external fun nativeScanFirst(value: String, type: Int): String
     private external fun nativeScanNext(value: String, type: Int, condition: Int): String
     private external fun nativeWriteValue(address: Long, value: String, type: Int): String
