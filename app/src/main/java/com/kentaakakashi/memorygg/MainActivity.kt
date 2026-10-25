@@ -43,8 +43,11 @@ class MainActivity : Activity() {
                 if (!binder.pingBinder()) {
                     "UserService connected with an invalid binder."
                 } else {
-                    IUserService.Stub.asInterface(binder)
-                        .getDiagnostics(android.os.Process.myPid())
+                    val service = IUserService.Stub.asInterface(binder)
+                    val pid = android.os.Process.myPid()
+                    val diagnostics = service.getDiagnostics(pid)
+                    val remoteProbe = service.probeRemoteValue(pid, nativeTestAddress())
+                    diagnostics + "\n\n== Cross-process known-value test ==\n" + remoteProbe
                 }
             } catch (t: Throwable) {
                 "UserService call failed: " + t.javaClass.simpleName + ": " + t.message
@@ -53,7 +56,8 @@ class MainActivity : Activity() {
                 append("")
                 append("== Shizuku UserService ==")
                 result.lineSequence().forEach { append(it) }
-                append("MemoryGG process only; this is not a test of game-process access.")
+                append("The memory test targets a known integer in MemoryGG and restores its original value.")
+                append("It does not scan, read, or modify a game/third-party process.")
             }
         }
 
@@ -204,6 +208,7 @@ class MainActivity : Activity() {
     }
 
     private external fun nativeSelfTest(): String
+    private external fun nativeTestAddress(): Long
 
     companion object {
         private const val SHIZUKU_REQUEST_CODE = 1001

@@ -6,8 +6,7 @@ import java.io.FileInputStream
 
 /**
  * Runs inside Shizuku's separate shell/root UserService process.
- * This milestone only probes procfs visibility for MemoryGG's own PID.
- * It deliberately does not read or write process memory.
+ * All process-access tests in this prototype target MemoryGG's own PID.
  */
 class MemoryUserService : IUserService.Stub() {
     override fun getDiagnostics(appPid: Int): String {
@@ -46,19 +45,35 @@ class MemoryUserService : IUserService.Stub() {
             .append('\n')
 
         val memOpenResult = try {
-            // Opening then immediately closing only tests the OS access check.
-            // No bytes are read or written.
+            // Open/close only: this never reads or writes bytes.
             FileInputStream(File("/proc/$appPid/mem")).use { }
             "OPEN ALLOWED; no bytes read or written"
         } catch (t: Throwable) {
             "DENIED / UNAVAILABLE (" + t.javaClass.simpleName + ": " + t.message + ")"
         }
         out.append("/proc/$appPid/mem open probe: ").append(memOpenResult).append('\n')
-        out.append("Important: this probes MemoryGG only, not any game or other app.")
+        out.append("This procfs probe targets MemoryGG only; not any game or other app.")
         return out.toString()
+    }
+
+    override fun probeRemoteValue(appPid: Int, address: Long): String {
+        if (appPid <= 0 || address <= 0L) {
+            return "Invalid test PID/address; no memory access attempted."
+        }
+        return try {
+            nativeProbeRemoteValue(appPid, address)
+        } catch (t: Throwable) {
+            "Cross-process test failed safely: " + t.javaClass.simpleName + ": " + t.message
+        }
     }
 
     override fun destroy() {
         System.exit(0)
+    }
+
+    private external fun nativeProbeRemoteValue(appPid: Int, address: Long): String
+
+    companion object {
+        init { System.loadLibrary("memorygg") }
     }
 }
