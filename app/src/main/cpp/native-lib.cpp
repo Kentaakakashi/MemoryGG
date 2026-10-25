@@ -1,109 +1,195 @@
 #include <jni.h>
-#include <cstdint>
+#include <algorithm>
 #include <cerrno>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
+#include <fstream>
+#include <iomanip>
+#include <limits>
+#include <mutex>
 #include <sstream>
 #include <string>
-#include <sys/types.h>
-#include <sys/uio.h>
+#include <unistd.h>
+#include <vector>
 
-// The only target value in this prototype belongs to MemoryGG itself.
+// Scanner engine is deliberately in-process: it only operates on this PID's mappings.
 static volatile int32_t controlled_value = 12345;
+enum ValueType { I32 = 0, F32 = 1, I64 = 2, F64 = 3 };
+struct Region { uintptr_t start; uintptr_t end; int priority; };
+struct Match { uintptr_t address; std::string value; long double numeric; };
+static std::mutex g_mutex;
+static std::vector<Match> g_matches;
+static std::vector<uintptr_t> g_known;
+static int g_type = I32;
+static int g_mem = -1;
+static constexpr size_t CHUNK = 256U * 1024U;
+static constexpr size_t MAX_BYTES = 96U * 1024U * 1024U;
+static constexpr size_t MAX_MATCHES = 3000;
 
-extern "C"
-JNIEXPORT jstring JNICALL
-Java_com_kentaakakashi_memorygg_MainActivity_nativeSelfTest(JNIEnv* env, jobject) {
-    const int32_t before = controlled_value;
-    controlled_value = 54321;
-    const int32_t after = controlled_value;
-    const bool pass = (before == 12345 && after == 54321);
-    std::ostringstream out;
-    out << (pass ? "PASS" : "FAIL")
-        << " (own-process int32 read/write; before=" << before
-        << ", after=" << after << ")";
-    controlled_value = 12345;
-    return env->NewStringUTF(out.str().c_str());
+static jstring js(JNIEnv* env, const std::string& s) { return env->NewStringUTF(s.c_str()); }
+static size_t widthFor(int t) { return (t == I64 || t == F64) ? 8U : 4U; }
+
+static bool parse(const std::string& s, int t, long double& out) {
+    if (s.empty()) return false;
+    char* end = nullptr; errno = 0;
+    if (t == I32 || t == I64) {
+        long long v = std::strtoll(s.c_str(), &end, 10);
+        if (errno || end == s.c_str() || *end != '\0') return false;
+        if (t == I32 && (v < INT32_MIN || v > INT32_MAX)) return false;
+        out = static_cast<long double>(v); return true;
+    }
+    double v = std::strtod(s.c_str(), &end);
+    if (errno || end == s.c_str() || *end != '\0' || !std::isfinite(v)) return false;
+    if (t == F32 && std::abs(v) > std::numeric_limits<float>::max()) return false;
+    out = v; return true;
 }
-
-extern "C"
-JNIEXPORT jlong JNICALL
-Java_com_kentaakakashi_memorygg_MainActivity_nativeTestAddress(JNIEnv*, jobject) {
-    return static_cast<jlong>(
-        reinterpret_cast<uintptr_t>(const_cast<int32_t*>(&controlled_value)));
+static bool decode(const uint8_t* b, int t, long double& out) {
+    if (t == I32) { int32_t v; std::memcpy(&v,b,4); out=v; return true; }
+    if (t == F32) { float v; std::memcpy(&v,b,4); if(!std::isfinite(v)) return false; out=v; return true; }
+    if (t == I64) { int64_t v; std::memcpy(&v,b,8); out=static_cast<long double>(v); return true; }
+    if (t == F64) { double v; std::memcpy(&v,b,8); if(!std::isfinite(v)) return false; out=v; return true; }
+    return false;
 }
-
-extern "C"
-JNIEXPORT jstring JNICALL
-Java_com_kentaakakashi_memorygg_MemoryUserService_nativeProbeRemoteValue(
-        JNIEnv* env, jobject, jint target_pid, jlong target_address) {
-    std::ostringstream out;
-    if (target_pid <= 0 || target_address <= 0) {
-        return env->NewStringUTF("INVALID target PID/address; no memory access attempted.");
+static std::string fmt(long double v, int t) {
+    std::ostringstream o;
+    if(t==I32) o<<static_cast<int32_t>(v);
+    else if(t==I64) o<<static_cast<int64_t>(v);
+    else if(t==F32) o<<std::setprecision(9)<<static_cast<float>(v);
+    else o<<std::setprecision(17)<<static_cast<double>(v);
+    return o.str();
+}
+static bool equalValue(long double a,long double b,int t) {
+    if(t==F32 || t==F64) {
+        long double scale=std::max(static_cast<long double>(1),std::max(std::abs(a),std::abs(b)));
+        return std::abs(a-b) <= scale*(t==F32 ? 1e-6L : 1e-12L);
     }
-
-    const pid_t pid = static_cast<pid_t>(target_pid);
-    void* remote_address = reinterpret_cast<void*>(
-        static_cast<uintptr_t>(target_address));
-
-    int32_t original = 0;
-    iovec read_local{&original, sizeof(original)};
-    iovec read_remote{remote_address, sizeof(original)};
-    errno = 0;
-    const ssize_t read_count = process_vm_readv(
-        pid, &read_local, 1, &read_remote, 1, 0);
-    if (read_count != static_cast<ssize_t>(sizeof(original))) {
-        const int error = errno;
-        out << "READ DENIED/FAILED (bytes=" << read_count
-            << ", errno=" << error << ": " << std::strerror(error) << "). "
-            << "No write was attempted.";
-        return env->NewStringUTF(out.str().c_str());
+    return a==b;
+}
+static bool readOwn(uintptr_t address, void* out, size_t len) {
+    if(g_mem<0) g_mem=open("/proc/self/mem",O_RDWR|O_CLOEXEC);
+    if(g_mem<0) return false;
+    return pread(g_mem,out,len,static_cast<off_t>(address))==static_cast<ssize_t>(len);
+}
+static bool writeOwn(uintptr_t address,const void* data,size_t len) {
+    if(g_mem<0) g_mem=open("/proc/self/mem",O_RDWR|O_CLOEXEC);
+    if(g_mem<0) return false;
+    return pwrite(g_mem,data,len,static_cast<off_t>(address))==static_cast<ssize_t>(len);
+}
+static std::vector<Region> regions() {
+    std::vector<Region> out;
+    std::ifstream f("/proc/self/maps"); std::string line;
+    while(std::getline(f,line)) {
+        std::istringstream in(line); std::string range,perm,offset,dev,inode,path;
+        if(!(in>>range>>perm>>offset>>dev>>inode)) continue;
+        std::getline(in,path);
+        if(perm.size()<3 || perm[0]!='r' || perm[1]!='w') continue;
+        size_t dash=range.find('-'); if(dash==std::string::npos) continue;
+        uintptr_t a=0,b=0;
+        try { a=std::stoull(range.substr(0,dash),nullptr,16); b=std::stoull(range.substr(dash+1),nullptr,16); }
+        catch(...) { continue; }
+        if(!a || b<=a) continue;
+        int p=2;
+        if(path.empty() || path.find("[heap]")!=std::string::npos || path.find("[anon")!=std::string::npos) p=0;
+        else if(path.find("libmemorygg.so")!=std::string::npos) p=1;
+        out.push_back({a,b,p});
     }
-
-    constexpr int32_t replacement = 67890;
-    iovec write_local{const_cast<int32_t*>(&replacement), sizeof(replacement)};
-    iovec write_remote{remote_address, sizeof(replacement)};
-    errno = 0;
-    const ssize_t write_count = process_vm_writev(
-        pid, &write_local, 1, &write_remote, 1, 0);
-    if (write_count != static_cast<ssize_t>(sizeof(replacement))) {
-        const int error = errno;
-        // Attempt to restore the original value even if a partial write occurred.
-        iovec restore_local{&original, sizeof(original)};
-        errno = 0;
-        const ssize_t restore_count = process_vm_writev(
-            pid, &restore_local, 1, &write_remote, 1, 0);
-        out << "READ PASS (value=" << original << "); WRITE DENIED/FAILED (bytes="
-            << write_count << ", errno=" << error << ": " << std::strerror(error)
-            << "); restore=" << (restore_count == static_cast<ssize_t>(sizeof(original))
-                                     ? "PASS" : "FAILED") << ".";
-        return env->NewStringUTF(out.str().c_str());
+    std::stable_sort(out.begin(),out.end(),[](const Region&a,const Region&b){return a.priority<b.priority;});
+    return out;
+}
+static std::string json(bool ok,const std::string& message,size_t scanned,bool capped) {
+    std::ostringstream o;
+    o<<"{\"ok\":"<<(ok?"true":"false")<<",\"message\":\"";
+    for(char c:message) { if(c=='\\'||c=='"') o<<'\\'; if(c=='\n'||c=='\r') o<<' '; else o<<c; }
+    o<<"\",\"count\":"<<g_matches.size()<<",\"scannedBytes\":"<<scanned<<",\"truncated\":"<<(capped?"true":"false")<<",\"matches\":[";
+    for(size_t i=0;i<g_matches.size();++i) {
+        if(i) o<<',';
+        o<<"{\"address\":\"0x"<<std::hex<<g_matches[i].address<<std::dec<<"\",\"value\":\""<<g_matches[i].value<<"\"}";
     }
+    o<<"]}"; return o.str();
+}
+static bool known(uintptr_t a) { return std::find(g_known.begin(),g_known.end(),a)!=g_known.end(); }
 
-    int32_t observed = 0;
-    iovec verify_local{&observed, sizeof(observed)};
-    errno = 0;
-    const ssize_t verify_count = process_vm_readv(
-        pid, &verify_local, 1, &read_remote, 1, 0);
-    const int verify_error = errno;
-    const bool verify_ok = verify_count == static_cast<ssize_t>(sizeof(observed))
-                           && observed == replacement;
-
-    iovec restore_local{&original, sizeof(original)};
-    errno = 0;
-    const ssize_t restore_count = process_vm_writev(
-        pid, &restore_local, 1, &write_remote, 1, 0);
-    const bool restore_ok = restore_count == static_cast<ssize_t>(sizeof(original));
-
-    out << "READ PASS (original=" << original << "); WRITE PASS (temporary value="
-        << replacement << "); VERIFY "
-        << (verify_ok ? "PASS" : "FAIL");
-    if (verify_count != static_cast<ssize_t>(sizeof(observed))) {
-        out << " (bytes=" << verify_count << ", errno=" << verify_error
-            << ": " << std::strerror(verify_error) << ")";
-    } else if (!verify_ok) {
-        out << " (observed=" << observed << ")";
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_kentaakakashi_memorygg_MainActivity_nativeSelfTest(JNIEnv* e,jobject) {
+    int32_t before=controlled_value; controlled_value=54321; int32_t after=controlled_value;
+    controlled_value=12345;
+    std::ostringstream o; o<<((before==12345&&after==54321)?"PASS":"FAIL")
+      <<" (own-process int32 read/write; before="<<before<<", after="<<after<<")";
+    return js(e,o.str());
+}
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_kentaakakashi_memorygg_MainActivity_nativeScanFirst(JNIEnv* e,jobject,jstring jv,jint jt) {
+    const char* c=e->GetStringUTFChars(jv,nullptr); std::string q=c?c:""; if(c)e->ReleaseStringUTFChars(jv,c);
+    int t=jt; if(t<0||t>3) return js(e,"{\"ok\":false,\"message\":\"Unknown type\",\"count\":0,\"matches\":[]}");
+    long double target=0; if(!parse(q,t,target)) return js(e,"{\"ok\":false,\"message\":\"Enter a valid number\",\"count\":0,\"matches\":[]}");
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_matches.clear(); g_known.clear(); g_type=t;
+    auto rs=regions(); std::vector<uint8_t> buf(CHUNK);
+    size_t scanned=0; bool capped=false; size_t w=widthFor(t);
+    for(const Region&r:rs) {
+        uintptr_t pos=(r.start+w-1)&~(static_cast<uintptr_t>(w)-1);
+        while(pos+w<=r.end) {
+            if(scanned>=MAX_BYTES||g_matches.size()>=MAX_MATCHES){capped=true;break;}
+            size_t n=static_cast<size_t>(std::min<uintptr_t>(CHUNK,r.end-pos));
+            n-=n%w; n=std::min(n,MAX_BYTES-scanned); n-=n%w; if(n<w)break;
+            if(readOwn(pos,buf.data(),n)) {
+                for(size_t off=0;off+w<=n;off+=w) {
+                    long double v=0; if(!decode(buf.data()+off,t,v)||!equalValue(v,target,t))continue;
+                    uintptr_t addr=pos+off; g_matches.push_back({addr,fmt(v,t),v}); g_known.push_back(addr);
+                    if(g_matches.size()>=MAX_MATCHES){capped=true;break;}
+                }
+            }
+            scanned+=n; pos+=n;
+        }
+        if(capped)break;
     }
-    out << "; RESTORE " << (restore_ok ? "PASS" : "FAIL")
-        << (restore_ok ? " (original value restored)." : " (original value may remain changed; inspect immediately).");
-    return env->NewStringUTF(out.str().c_str());
+    std::sort(g_known.begin(),g_known.end()); g_known.erase(std::unique(g_known.begin(),g_known.end()),g_known.end());
+    return js(e,json(true,g_matches.empty()?"No matches found. Try another value or type.":"First scan complete (this process only).",scanned,capped));
+}
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_kentaakakashi_memorygg_MainActivity_nativeScanNext(JNIEnv* e,jobject,jstring jv,jint jt,jint jc) {
+    const char* c=e->GetStringUTFChars(jv,nullptr); std::string q=c?c:""; if(c)e->ReleaseStringUTFChars(jv,c);
+    int t=jt,cond=jc; long double target=0;
+    if(t<0||t>3||cond<0||cond>4)return js(e,"{\"ok\":false,\"message\":\"Invalid type or condition\",\"count\":0,\"matches\":[]}");
+    if(cond==0&&!parse(q,t,target))return js(e,"{\"ok\":false,\"message\":\"Exact scan needs a valid number\",\"count\":0,\"matches\":[]}");
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if(g_matches.empty())return js(e,"{\"ok\":false,\"message\":\"Run First Scan first\",\"count\":0,\"matches\":[]}");
+    if(g_type!=t)return js(e,"{\"ok\":false,\"message\":\"Type changed; reset and start again\",\"count\":0,\"matches\":[]}");
+    std::vector<Match> next; next.reserve(g_matches.size()); size_t w=widthFor(t);
+    for(const Match&m:g_matches) {
+        uint8_t b[8]={}; if(!readOwn(m.address,b,w))continue; long double v=0; if(!decode(b,t,v))continue;
+        bool keep=false;
+        switch(cond) {
+            case 0: keep=equalValue(v,target,t); break;
+            case 1: keep=v>m.numeric&&!equalValue(v,m.numeric,t); break;
+            case 2: keep=v<m.numeric&&!equalValue(v,m.numeric,t); break;
+            case 3: keep=equalValue(v,m.numeric,t); break;
+            case 4: keep=!equalValue(v,m.numeric,t); break;
+        }
+        if(keep)next.push_back({m.address,fmt(v,t),v});
+    }
+    g_matches.swap(next);
+    return js(e,json(true,"Next scan complete.",0,false));
+}
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_kentaakakashi_memorygg_MainActivity_nativeWriteValue(JNIEnv* e,jobject,jlong ja,jstring jv,jint jt) {
+    uintptr_t a=static_cast<uintptr_t>(ja); const char*c=e->GetStringUTFChars(jv,nullptr);std::string q=c?c:"";if(c)e->ReleaseStringUTFChars(jv,c);
+    int t=jt; long double v=0;if(t<0||t>3||!parse(q,t,v))return js(e,"Write rejected: invalid number/type.");
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if(t!=g_type||!known(a))return js(e,"Write rejected: address is not a known scan candidate.");
+    uint8_t b[8]={};
+    if(t==I32){int32_t n=static_cast<int32_t>(v);std::memcpy(b,&n,4);}
+    else if(t==F32){float n=static_cast<float>(v);std::memcpy(b,&n,4);}
+    else if(t==I64){int64_t n=static_cast<int64_t>(v);std::memcpy(b,&n,8);}
+    else {double n=static_cast<double>(v);std::memcpy(b,&n,8);}
+    if(!writeOwn(a,b,widthFor(t)))return js(e,"Write failed: this process memory mapping denied the write.");
+    for(Match&m:g_matches)if(m.address==a){m.value=fmt(v,t);m.numeric=v;break;}
+    return js(e,"PASS: wrote "+fmt(v,t));
+}
+extern "C" JNIEXPORT void JNICALL
+Java_com_kentaakakashi_memorygg_MainActivity_nativeClearScan(JNIEnv*,jobject) {
+    std::lock_guard<std::mutex> lock(g_mutex);g_matches.clear();g_known.clear();
 }
