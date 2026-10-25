@@ -1,31 +1,32 @@
-# MemoryGG — diagnostic starter
+# MemoryGG — Shizuku diagnostics prototype
 
-Rootless Android memory-access feasibility prototype using Kotlin, JNI/C++, and Shizuku.
+A phone-buildable Android prototype using Kotlin, JNI/C++, and Shizuku. This is a diagnostic milestone, not yet a game memory editor.
 
-## What this first milestone proves
-- The app can bind to Shizuku and report its availability/version.
-- A native C++ diagnostic can read and change a known value **inside this app's own process**.
-- The app can ask Shizuku to run a harmless shell identity check (`id`) and display the result.
+## Current diagnostics
 
-**This does not prove arbitrary cross-app/game memory access.** Android/Linux process isolation and SELinux may block it even when Shizuku works. This starter deliberately does not attempt to bypass those controls.
+- Native self-test: reads and changes a known integer inside MemoryGG's own process, then restores it.
+- Shizuku binder and permission checks.
+- Official Shizuku UserService pattern (not the private newProcess API).
+- Reports the service process PID, actual UID (usually 2000 for Shizuku started through Wireless debugging), and SELinux context.
+- Read-only access probes against MemoryGG's own process: whether /proc/<pid>/maps can be read and whether /proc/<pid>/mem can be opened. The memory file is never read from or written to.
 
-## Build on GitHub (phone-only)
-1. Open **Actions** and enable GitHub Actions if prompted.
-2. Open **Actions → Build MemoryGG diagnostic APK → Run workflow**.
-3. Wait for the run to finish, open the successful run, and download the `MemoryGG-debug-apk` artifact.
-4. Extract the ZIP artifact on your phone and install the APK. Android may ask you to allow installs from the browser/file manager.
+These probes are not evidence that a third-party game process can be read or modified. Android process isolation, ptrace restrictions, kernel configuration, and SELinux can block it. No restrictions are bypassed by this prototype.
 
-The workflow also runs on pushes to `main`.
+## Build without a PC
 
-## Shizuku setup
-1. Install Shizuku from its official project page: https://shizuku.rikka.app/
-2. Start it using Wireless debugging (no PC needed on Android 11+).
-3. Open MemoryGG and grant its Shizuku request when prompted.
-4. Tap **Run diagnostics**.
+1. Open Actions → Build MemoryGG diagnostic APK.
+2. Download the MemoryGG-debug-apk artifact from a successful run.
+3. Extract the artifact ZIP on your phone and install the APK.
 
-## Expected results
-- `Native self-test: PASS` means JNI/C++ can modify a value in its own process.
-- `Shizuku: CONNECTED` means the app can communicate with Shizuku.
-- Shell identity output shows the identity of the command launched through Shizuku.
+Pushes to main trigger the workflow automatically.
 
-These results are separate from whether Android permits access to a different app's process. Do not interpret them as proof that game RAM can be edited.
+## Device setup
+
+1. Install Shizuku from its official page: https://shizuku.rikka.app/
+2. Start it with Wireless debugging (Android 11+ supports this without a PC).
+3. Open MemoryGG, grant its Shizuku permission, and tap Run diagnostics.
+4. Read the UserService UID, SELinux context, and procfs probe results. A denial is useful evidence, not a build failure.
+
+## Upstream reference
+
+The UserService implementation follows the pattern in the official Shizuku API demo: https://github.com/RikkaApps/Shizuku-API/tree/master/demo

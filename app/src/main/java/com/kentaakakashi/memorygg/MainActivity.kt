@@ -1,22 +1,65 @@
 package com.kentaakakashi.memorygg
 
 import android.app.Activity
+import android.content.ComponentName
+import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.IBinder
+import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.graphics.Color
-import android.view.ViewGroup
 import rikka.shizuku.Shizuku
 
 class MainActivity : Activity() {
     private lateinit var output: TextView
+    private var bindingRequested = false
 
     private val permissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
         if (requestCode == SHIZUKU_REQUEST_CODE) {
-            append("\nShizuku permission result: " + if (grantResult == android.content.pm.PackageManager.PERMISSION_GRANTED) "GRANTED" else "DENIED")
+            append("Shizuku permission result: " +
+                if (grantResult == PackageManager.PERMISSION_GRANTED) "GRANTED" else "DENIED")
             refreshShizukuState()
+        }
+    }
+
+    private val userServiceArgs by lazy {
+        Shizuku.UserServiceArgs(
+            ComponentName(BuildConfig.APPLICATION_ID, MemoryUserService::class.java.name)
+        )
+            .daemon(false)
+            .processNameSuffix("memorygg-diagnostics")
+            .debuggable(BuildConfig.DEBUG)
+            .version(BuildConfig.VERSION_CODE)
+    }
+
+    private val userServiceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+            bindingRequested = true
+            val result = try {
+                if (!binder.pingBinder()) {
+                    "UserService connected with an invalid binder."
+                } else {
+                    IUserService.Stub.asInterface(binder)
+                        .getDiagnostics(android.os.Process.myPid())
+                }
+            } catch (t: Throwable) {
+                "UserService call failed: " + t.javaClass.simpleName + ": " + t.message
+            }
+            runOnUiThread {
+                append("")
+                append("== Shizuku UserService ==")
+                result.lineSequence().forEach { append(it) }
+                append("MemoryGG process only; this is not a test of game-process access.")
+            }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName) {
+            bindingRequested = false
+            runOnUiThread { append("Shizuku UserService disconnected.") }
         }
     }
 
@@ -46,10 +89,6 @@ class MainActivity : Activity() {
             text = "Ready. Start Shizuku, then run diagnostics."
             setPadding(0, 8, 0, 16)
         }
-        val runButton = Button(this).apply {
-            text = "Run diagnostics"
-            setOnClickListener { runDiagnostics() }
-        }
         val permissionButton = Button(this).apply {
             text = "Request Shizuku permission"
             setOnClickListener {
@@ -57,16 +96,27 @@ class MainActivity : Activity() {
                     if (Shizuku.isPreV11()) append("This Shizuku version is too old.")
                     else Shizuku.requestPermission(SHIZUKU_REQUEST_CODE)
                 } catch (t: Throwable) {
-                    append("Permission request error: ${t.javaClass.simpleName}: ${t.message}")
+                    append("Permission request error: " + t.javaClass.simpleName + ": " + t.message)
                 }
             }
+        }
+        val runButton = Button(this).apply {
+            text = "Run diagnostics"
+            setOnClickListener { runDiagnostics() }
+        }
+        val stopButton = Button(this).apply {
+            text = "Stop diagnostic service"
+            setOnClickListener { stopUserService() }
         }
         root.addView(title)
         root.addView(subtitle)
         root.addView(permissionButton, matchWrap())
         root.addView(runButton, matchWrap())
+        root.addView(stopButton, matchWrap())
         val scroll = ScrollView(this).apply { addView(output) }
-        root.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        root.addView(scroll, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
+        ))
         setContentView(root)
         refreshShizukuState()
     }
@@ -79,43 +129,77 @@ class MainActivity : Activity() {
         val state = try {
             when {
                 !Shizuku.pingBinder() -> "NOT CONNECTED (start Shizuku)"
-                Shizuku.checkSelfPermission() == android.content.pm.PackageManager.PERMISSION_GRANTED -> "CONNECTED; permission granted"
+                Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED -> "CONNECTED; permission granted"
                 else -> "CONNECTED; permission not granted"
             }
         } catch (t: Throwable) {
-            "Unavailable: ${t.javaClass.simpleName}: ${t.message}"
+            "Unavailable: " + t.javaClass.simpleName + ": " + t.message
         }
-        append("Shizuku status: $state")
+        append("Shizuku status: " + state)
     }
 
     private fun runDiagnostics() {
         output.text = ""
         append("== MemoryGG diagnostics ==")
-        append("App UID: ${android.os.Process.myUid()}")
-        append("Native self-test: ${nativeSelfTest()}")
-        append("Note: native test changes only a value inside this app's own process.")
+        append("App UID: " + android.os.Process.myUid())
+        append("App PID: " + android.os.Process.myPid())
+        append("Native self-test: " + nativeSelfTest())
+        append("Native test changes only a value inside this app's own process.")
         if (!Shizuku.pingBinder()) {
             append("Shizuku: NOT CONNECTED. Start it via Wireless debugging and retry.")
             return
         }
-        if (Shizuku.checkSelfPermission() != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            append("Shizuku: connected, but permission is not granted. Tap Request Shizuku permission.")
+        if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+            append("Shizuku is connected but permission is not granted. Tap Request Shizuku permission.")
             return
         }
-        append("Shizuku: CONNECTED; permission granted.")
-        append("Shizuku binder and permission checks passed.")
-        append("Shell execution is not tested in this build: Shizuku newProcess is private in the installed public API.")
-        append("Next step: configure a Shizuku UserService for a supported shell diagnostic.")
-        append("Important: Shizuku permission alone does not prove arbitrary third-party process memory access.")
+        append("Shizuku binder and permission checks: PASS")
+        if (Shizuku.getVersion() < 10) {
+            append("UserService requires Shizuku API version 10 or newer.")
+            return
+        }
+        if (bindingRequested) {
+            append("UserService is already starting or connected. See its results below.")
+            return
+        }
+        try {
+            append("Starting supported Shizuku UserService...")
+            bindingRequested = true
+            Shizuku.bindUserService(userServiceArgs, userServiceConnection)
+        } catch (t: Throwable) {
+            bindingRequested = false
+            append("UserService start failed: " + t.javaClass.simpleName + ": " + t.message)
+        }
+    }
+
+    private fun stopUserService() {
+        if (!bindingRequested) {
+            append("No diagnostic UserService is currently bound.")
+            return
+        }
+        try {
+            Shizuku.unbindUserService(userServiceArgs, userServiceConnection, true)
+            bindingRequested = false
+            append("UserService unbind requested.")
+        } catch (t: Throwable) {
+            append("UserService stop failed: " + t.javaClass.simpleName + ": " + t.message)
+        }
     }
 
     private fun append(line: String) {
         if (!::output.isInitialized) return
-        output.append("\n$line")
+        output.append("\n" + line)
     }
 
     override fun onDestroy() {
         Shizuku.removeRequestPermissionResultListener(permissionListener)
+        if (bindingRequested) {
+            try {
+                Shizuku.unbindUserService(userServiceArgs, userServiceConnection, true)
+            } catch (_: Throwable) {
+            }
+            bindingRequested = false
+        }
         super.onDestroy()
     }
 
