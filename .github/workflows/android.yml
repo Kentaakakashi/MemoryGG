@@ -47,7 +47,7 @@ jobs:
           unzip -p "$APK" "lib/arm64-v8a/libmemorygg.so" > "$RUNNER_TEMP/libmemorygg.so"
           NM="$ANDROID_HOME/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
           "$NM" -D "$RUNNER_TEMP/libmemorygg.so" > "$RUNNER_TEMP/native-symbols.txt"
-          for symbol in nativeSelfTest nativeScanFirst nativeScanNext nativeWriteValue nativeClearScan; do
+          for symbol in nativeSelfTest nativeGetTestValue nativeSetTestValue nativeScanFirst nativeScanNext nativeWriteValue nativeClearScan; do
             grep -q "Java_com_kentaakakashi_memorygg_MainActivity_${symbol}" "$RUNNER_TEMP/native-symbols.txt"
             echo "Verified JNI export: $symbol"
           done
