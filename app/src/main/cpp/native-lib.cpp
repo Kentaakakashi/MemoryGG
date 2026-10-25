@@ -92,8 +92,8 @@ static std::vector<Region> regions() {
         catch(...) { continue; }
         if(!a || b<=a) continue;
         int p=2;
-        if(path.empty() || path.find("[heap]")!=std::string::npos || path.find("[anon")!=std::string::npos) p=0;
-        else if(path.find("libmemorygg.so")!=std::string::npos) p=1;
+        if(path.find("libmemorygg.so")!=std::string::npos) p=0;
+        else if(path.empty() || path.find("[heap]")!=std::string::npos || path.find("[anon")!=std::string::npos) p=1;
         out.push_back({a,b,p});
     }
     std::stable_sort(out.begin(),out.end(),[](const Region&a,const Region&b){return a.priority<b.priority;});
