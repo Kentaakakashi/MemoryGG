@@ -203,3 +203,15 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_kentaakakashi_memorygg_MainActivity_nativeClearScan(JNIEnv*,jobject) {
     std::lock_guard<std::mutex> lock(g_mutex);g_matches.clear();g_known.clear();
 }
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_kentaakakashi_memorygg_MainActivity_nativeGetTestValue(JNIEnv*,jobject) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return static_cast<jint>(controlled_value);
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_kentaakakashi_memorygg_MainActivity_nativeSetTestValue(JNIEnv*,jobject,jint value) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    controlled_value = static_cast<int32_t>(value);
+    return static_cast<jint>(controlled_value);
+}
