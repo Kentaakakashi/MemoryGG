@@ -114,10 +114,20 @@ static bool known(uintptr_t a) { return std::find(g_known.begin(),g_known.end(),
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_kentaakakashi_memorygg_MainActivity_nativeSelfTest(JNIEnv* e,jobject) {
-    int32_t before=controlled_value; controlled_value=54321; int32_t after=controlled_value;
-    controlled_value=12345;
-    std::ostringstream o; o<<((before==12345&&after==54321)?"PASS":"FAIL")
-      <<" (own-process int32 read/write; before="<<before<<", after="<<after<<")";
+    std::lock_guard<std::mutex> lock(g_mutex);
+    const uintptr_t address = reinterpret_cast<uintptr_t>(const_cast<int32_t*>(&controlled_value));
+    int32_t before = 0, after = 0;
+    const bool readOk = readOwn(address, &before, sizeof(before));
+    const int32_t replacement = 54321;
+    const bool writeOk = readOk && writeOwn(address, &replacement, sizeof(replacement));
+    const bool verifyOk = writeOk && readOwn(address, &after, sizeof(after));
+    const int32_t restore = 12345;
+    const bool restoreOk = writeOwn(address, &restore, sizeof(restore));
+    const bool pass = readOk && writeOk && verifyOk && restoreOk && before == 12345 && after == 54321;
+    std::ostringstream o;
+    o << (pass ? "PASS" : "FAIL")
+      << " (/proc/self/mem own-process read/write; before=" << before
+      << ", observed=" << after << ", restored=" << (restoreOk ? "yes" : "no") << ")";
     return js(e,o.str());
 }
 extern "C" JNIEXPORT jstring JNICALL
