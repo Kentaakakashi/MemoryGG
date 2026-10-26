@@ -3,6 +3,8 @@ package com.kentaakakashi.memorygg
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -35,15 +37,57 @@ class MainActivity : Activity() {
     private lateinit var results: LinearLayout
     private lateinit var firstButton: Button
     private lateinit var nextButton: Button
+    private lateinit var agentPackageInput: EditText
+    private lateinit var agentTokenInput: EditText
+    private lateinit var connectAgentButton: Button
+    @Volatile private var agentService: IMemoryAgent? = null
+    private var agentBound = false
     private val scanExecutor = Executors.newSingleThreadExecutor()
     private val frozen = ConcurrentHashMap<Long, Pair<String, Int>>()
     private val displayedMatches = mutableListOf<ScanMatch>()
     private var serviceBound = false
 
+    private val agentConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+            val remote = IMemoryAgent.Stub.asInterface(binder)
+            val suppliedToken = if (::agentTokenInput.isInitialized) agentTokenInput.text.toString().trim() else ""
+            val auth = try { remote.authorize(suppliedToken) }
+            catch (t: Throwable) { "DENIED: " + t.javaClass.simpleName + ": " + t.message }
+            runOnUiThread {
+                if (auth.startsWith("AUTHORIZED:")) {
+                    agentService = remote
+                    connectAgentButton.text = "Disconnect agent"
+                    val info = try { remote.getInfo() } catch (t: Throwable) { t.message ?: "info unavailable" }
+                    appendDiagnostic("Target agent connected: " + info)
+                    status.text = "Connected to target process. Scan and edit requests now run inside that app."
+                    refreshProbeDisplay()
+                } else {
+                    agentService = null
+                    appendDiagnostic("Agent pairing failed: " + auth)
+                    status.text = auth
+                    if (agentBound) {
+                        try { unbindService(this@MainActivity.agentConnection) } catch (_: Throwable) { }
+                        agentBound = false
+                    }
+                }
+            }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName) {
+            agentService = null
+            frozen.clear()
+            runOnUiThread {
+                if (::connectAgentButton.isInitialized) connectAgentButton.text = "Connect agent"
+                if (::status.isInitialized) status.text = "Agent disconnected; scans use MemoryGG's own process."
+                refreshProbeDisplay()
+            }
+        }
+    }
+
     private val freezeExecutor = Executors.newSingleThreadScheduledExecutor().apply {
         scheduleAtFixedRate({
             for ((address, pair) in frozen) {
-                try { nativeWriteValue(address, pair.first, pair.second) } catch (_: Throwable) { }
+                try { val agent = agentService; if (agent != null) agent.writeValue(address, pair.first, pair.second) else nativeWriteValue(address, pair.first, pair.second) } catch (_: Throwable) { }
             }
         }, 150, 150, TimeUnit.MILLISECONDS)
     }
@@ -114,6 +158,29 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.rgb(38, 31, 22))
         })
 
+        agentPackageInput = EditText(this).apply {
+            hint = "Target package (Agent Test Host)"
+            setSingleLine(true)
+            setText(if (BuildConfig.DEBUG) "com.kentaakakashi.memorygg.agenthost.debug" else "com.kentaakakashi.memorygg.agenthost")
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.GRAY)
+            inputType = InputType.TYPE_CLASS_TEXT
+        }
+        agentTokenInput = EditText(this).apply {
+            hint = "Pairing token copied from Agent Test Host"
+            setSingleLine(true)
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.GRAY)
+            inputType = InputType.TYPE_CLASS_TEXT
+        }
+        connectAgentButton = Button(this).apply {
+            text = "Connect agent"
+            setOnClickListener { toggleAgentConnection() }
+        }
+        root.addView(agentPackageInput)
+        root.addView(agentTokenInput)
+        root.addView(connectAgentButton)
+
         typeSpinner = Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
                 listOf("Int32", "Float32", "Int64", "Float64"))
@@ -137,7 +204,7 @@ class MainActivity : Activity() {
         val demoRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             demoValue = TextView(this@MainActivity).apply {
-                text = "Test value: " + nativeGetTestValue()
+                text = "Test value: " + getCurrentTestValue()
                 textSize = 13f
                 setTextColor(Color.rgb(140, 220, 175))
                 gravity = android.view.Gravity.CENTER_VERTICAL
@@ -155,14 +222,14 @@ class MainActivity : Activity() {
             addView(Button(this@MainActivity).apply {
                 text = "Reset"
                 setOnClickListener {
-                    nativeSetTestValue(12345)
-                    demoValue.text = "Test value: 12345"
+                    setCurrentTestValue(12345)
+                    refreshProbeDisplay()
                     status.text = "Test fixture reset to 12345. Select Int32 and use First Scan."
                 }
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.7f))
             addView(Button(this@MainActivity).apply {
                 text = "Use"
-                setOnClickListener { scanValue.setText(nativeGetTestValue().toString()) }
+                setOnClickListener { scanValue.setText(getCurrentTestValue().toString()) }
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.45f))
         }
         val scanRow = LinearLayout(this).apply {
@@ -196,7 +263,7 @@ class MainActivity : Activity() {
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
         status = TextView(this).apply {
-            text = "Ready. Run First Scan with 12345 and Int32 to test the native engine."
+            text = "Open Agent Test Host, copy its token, and connect to scan that app. Without a connection, this only scans MemoryGG itself."
             textSize = 12f
             setTextColor(Color.rgb(218, 224, 238))
             setPadding(0, 8, 0, 8)
@@ -219,11 +286,55 @@ class MainActivity : Activity() {
         refreshShizukuState()
     }
 
+    private fun toggleAgentConnection() {
+        if (agentService != null || agentBound) {
+            agentService = null
+            frozen.clear()
+            if (agentBound) { try { unbindService(agentConnection) } catch (_: Throwable) { }; agentBound = false }
+            connectAgentButton.text = "Connect agent"
+            status.text = "Disconnected. Scanner returned to MemoryGG's own process."
+            refreshProbeDisplay()
+            return
+        }
+        val targetPackage = agentPackageInput.text.toString().trim()
+        val token = agentTokenInput.text.toString().trim()
+        if (targetPackage.isBlank() || token.isBlank()) {
+            status.text = "Enter the target package and paste its pairing token."
+            return
+        }
+        try {
+            val component = ComponentName(targetPackage, AGENT_SERVICE_CLASS)
+            agentBound = bindService(Intent().setComponent(component), agentConnection, Context.BIND_AUTO_CREATE)
+            status.text = if (agentBound) "Connecting and verifying pairing token..." else
+                "Could not bind. Check the package and that Agent Test Host is installed and opened."
+        } catch (t: Throwable) {
+            agentBound = false
+            status.text = "Connection failed: " + t.javaClass.simpleName + ": " + t.message
+        }
+    }
+
+    private fun getCurrentTestValue(): Int =
+        try { agentService?.getProbeValue() ?: nativeGetTestValue() } catch (_: Throwable) { nativeGetTestValue() }
+
+    private fun setCurrentTestValue(value: Int) {
+        try {
+            val agent = agentService
+            if (agent != null) agent.setProbeValue(value) else nativeSetTestValue(value)
+        } catch (t: Throwable) {
+            status.text = "Could not update probe: " + t.javaClass.simpleName
+        }
+    }
+
+    private fun refreshProbeDisplay() {
+        if (!::demoValue.isInitialized) return
+        demoValue.text = "Test value (" + (if (agentService != null) "target" else "local") + "): " + getCurrentTestValue()
+    }
+
     private fun adjustTestValue(delta: Int) {
-        val next = (nativeGetTestValue().toLong() + delta)
+        val next = (getCurrentTestValue().toLong() + delta)
             .coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt()
-        nativeSetTestValue(next)
-        demoValue.text = "Test value: " + next
+        setCurrentTestValue(next)
+        refreshProbeDisplay()
         status.text = "Test fixture is now " + next + ". Use Next Scan with Increased/Decreased/Changed to refine matches."
     }
 
@@ -233,12 +344,15 @@ class MainActivity : Activity() {
         val value = scanValue.text.toString().trim()
         if (first && value.isEmpty()) { status.text = "Enter a number for First Scan."; return }
         if (!first && condition == 0 && value.isEmpty()) { status.text = "Exact-value Next Scan needs a number."; return }
+        if (first) frozen.clear()
         firstButton.isEnabled = false
         nextButton.isEnabled = false
         status.text = if (first) "Scanning this process's writable memory..." else "Refining matches..."
         scanExecutor.execute {
             val result = try {
-                if (first) nativeScanFirst(value, type) else nativeScanNext(value, type, condition)
+                val agent = agentService
+                if (agent != null) { if (first) agent.scanFirst(value, type) else agent.scanNext(value, type, condition) }
+                else { if (first) nativeScanFirst(value, type) else nativeScanNext(value, type, condition) }
             } catch (t: Throwable) {
                 "{\"ok\":false,\"message\":\"Native scan error: " + t.javaClass.simpleName + "\"}"
             }
@@ -340,7 +454,7 @@ class MainActivity : Activity() {
             .setPositiveButton("Write") { _, _ ->
                 val newValue = edit.text.toString().trim()
                 scanExecutor.execute {
-                    val result = try { nativeWriteValue(match.address, newValue, type) }
+                    val result = try { val agent = agentService; if (agent != null) agent.writeValue(match.address, newValue, type) else nativeWriteValue(match.address, newValue, type) }
                     catch (t: Throwable) { "Write failed: " + t.javaClass.simpleName + ": " + t.message }
                     runOnUiThread {
                         status.text = result
@@ -359,6 +473,7 @@ class MainActivity : Activity() {
     private fun resetScan() {
         scanExecutor.execute {
             nativeClearScan()
+            try { agentService?.clearScan() } catch (_: Throwable) { }
             frozen.clear()
             runOnUiThread {
                 displayedMatches.clear()
@@ -418,6 +533,8 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        agentService = null
+        if (agentBound) { try { unbindService(agentConnection) } catch (_: Throwable) { }; agentBound = false }
         Shizuku.removeRequestPermissionResultListener(permissionListener)
         if (serviceBound) {
             try { Shizuku.unbindUserService(userServiceArgs, userServiceConnection, true) } catch (_: Throwable) { }
@@ -439,6 +556,7 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_CODE = 1001
+        private const val AGENT_SERVICE_CLASS = "com.kentaakakashi.memorygg.agenthost.AgentHostService"
         init { System.loadLibrary("memorygg") }
     }
 }

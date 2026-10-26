@@ -13,4 +13,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "MemoryGG"
-include(":app")
+include(":app", ":agenthost")

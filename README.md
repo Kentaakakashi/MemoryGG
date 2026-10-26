@@ -1,40 +1,35 @@
-# MemoryGG — in-process scanner prototype
+# MemoryGG — rootless target-process agent prototype
 
-MemoryGG is a phone-buildable Android prototype with a Kotlin scanner interface, a native C++ engine, and optional Shizuku privilege diagnostics.
+MemoryGG is restarting its memory-access architecture. Shizuku shell access is not the scan backend: the target phone denied shell access to other processes' maps and memory.
 
-## Included scanner features
+## Current architecture
 
-- First Scan by exact value: Int32, Float32, Int64, or Float64.
-- Next Scan refinements: exact value, increased, decreased, unchanged, or changed.
-- Candidate addresses and current value snapshots.
-- Edit/write a candidate and freeze/unfreeze it while MemoryGG remains open.
-- A controlled integer fixture so the scan flow can be tested reproducibly.
-- Bounded native scan budget (96 MiB and 3,000 stored matches), with writable mappings scanned first.
-- A CI check verifies the scanner JNI entry points exist in the packaged ARM64 library.
-- Shizuku diagnostics report the actual service UID and SELinux context.
+- MemoryGG controller APK: scan controls, results, editing, and freeze UI.
+- MemoryGG Agent Test Host APK: a separate Android app whose native scanner runs within its own process.
+- Authenticated Binder bridge: the controller binds to the host service and must supply the random pairing token displayed by the host.
+- Native engine: the same C++ scanner source is compiled into both APKs. When connected, calls execute inside the host process; otherwise, the controller only scans itself.
 
-## Quick self-test
+The first target is a test host, not arbitrary installed games. A game must explicitly contain or load the agent before the bridge can inspect its process. This does not bypass Android's sandbox for apps that have not integrated the agent. Rootless APK injection and compatibility research are a later milestone.
 
-1. Install the latest MemoryGG-debug-apk artifact from a successful Actions run.
-2. Open MemoryGG. Keep the type on Int32 and press Reset beside the green Test value (it should show 12345).
-3. Press Use to put the current fixture value into the scan input.
-4. Tap First. The output should show matches; the current process contains the fixture.
-5. Tap +1 to change the fixture, choose Increased or Changed, then tap Next.
-6. Tap Edit or Freeze on a candidate to exercise those controls. Reset returns the known fixture to 12345.
+## Test the agent bridge
 
-The test fixture and scanner are part of MemoryGG's own process. They are a reproducible engine test, not evidence of game-memory access.
+1. Download and extract the MemoryGG-rootless-test-apks artifact from a successful GitHub Actions run.
+2. Install both MemoryGG-controller-debug.apk and MemoryGG-agent-host-debug.apk.
+3. Open MemoryGG Agent Test Host. Copy its long pairing token and leave the app installed.
+4. Open MemoryGG. The target package defaults to com.kentaakakashi.memorygg.agenthost.debug. Paste the token and tap Connect agent.
+5. Ensure the probe shows target. Keep type on Int32, tap Reset and Use, then First.
+6. Switch to Agent Test Host and tap +1. Return to MemoryGG, choose Increased or Changed, and tap Next. Try Edit or Freeze on a match.
 
-## Critical limitation: stock Android process isolation
+The host displays its PID and UID. This test demonstrates that scan commands execute inside a distinct app process; it does not demonstrate support for unrelated third-party games.
 
-Your device test showed Shizuku UserService running as UID 2000 (shell) with SELinux context u:r:shell:s0. It could not read MemoryGG's own process maps and could not open its proc-memory file. The kernel memory-read call returned EPERM. This is direct evidence that a Shizuku shell process is not an external game-memory backend on your current phone.
+## Important limitations
 
-The scan/editor screen in this build operates inside MemoryGG itself. It does not scan another installed game's live RAM. The major next engineering step for rootless game-memory support is a compatible target-app agent running inside the target process plus a controller connection. That patch/agent bridge is not implemented yet. APK patching can require reinstalling a differently signed app and may fail for split APKs, native integrity checks, or online games. Keep experiments to offline apps you own/control.
+- No root is used for the test-host architecture.
+- A service in an app's default process can access that process's own memory; a separate app cannot use this to gain unrestricted access to another app.
+- Candidate addresses belong to the target process and must only be sent back to that same agent. Do not write them from the controller's local native library.
+- Game integration may require APK modification and re-signing. Split APKs, signature/licensing checks, integrity checks, and anti-tamper mechanisms may make a game incompatible.
+- Keep experiments to offline games you own or are authorized to modify.
 
-## Build on phone
+## Build
 
-Open Actions → Build MemoryGG diagnostic APK → select a successful run → download MemoryGG-debug-apk, extract the ZIP, then install app-debug.apk.
-
-## Shizuku
-
-The UserService flow follows the official Shizuku API demo:
-https://github.com/RikkaApps/Shizuku-API/tree/master/demo
+GitHub Actions runs gradle assembleDebug, validates JNI entry points in both ARM64 native libraries, and uploads the two debug APKs as MemoryGG-rootless-test-apks.

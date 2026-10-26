@@ -1,4 +1,4 @@
-name: Build MemoryGG diagnostic APK
+name: Build MemoryGG rootless agent test APKs
 
 on:
   push:
@@ -35,27 +35,39 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build debug APK
+      - name: Build both APKs
         run: gradle --no-daemon assembleDebug
 
-      - name: Validate packaged scanner JNI
+      - name: Validate controller JNI exports
         shell: bash
         run: |
           set -euo pipefail
-          APK="app/build/outputs/apk/debug/app-debug.apk"
-          test -f "$APK"
-          unzip -p "$APK" "lib/arm64-v8a/libmemorygg.so" > "$RUNNER_TEMP/libmemorygg.so"
           NM="$ANDROID_HOME/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
-          "$NM" -D "$RUNNER_TEMP/libmemorygg.so" > "$RUNNER_TEMP/native-symbols.txt"
-          for symbol in nativeSelfTest nativeGetTestValue nativeSetTestValue nativeScanFirst nativeScanNext nativeWriteValue nativeClearScan; do
-            grep -q "Java_com_kentaakakashi_memorygg_MainActivity_${symbol}" "$RUNNER_TEMP/native-symbols.txt"
-            echo "Verified JNI export: $symbol"
-          done
+          CONTROLLER="app/build/outputs/apk/debug/app-debug.apk"
+          HOST="agenthost/build/outputs/apk/debug/agenthost-debug.apk"
+          test -f "$CONTROLLER"
+          test -f "$HOST"
+          unzip -p "$CONTROLLER" "lib/arm64-v8a/libmemorygg.so" > "$RUNNER_TEMP/controller.so"
+          unzip -p "$HOST" "lib/arm64-v8a/libmemorygg.so" > "$RUNNER_TEMP/agenthost.so"
+          "$NM" -D "$RUNNER_TEMP/controller.so" > "$RUNNER_TEMP/controller-symbols.txt"
+          "$NM" -D "$RUNNER_TEMP/agenthost.so" > "$RUNNER_TEMP/agenthost-symbols.txt"
+          grep -q "Java_com_kentaakakashi_memorygg_MainActivity_nativeSelfTest" "$RUNNER_TEMP/controller-symbols.txt"
+          grep -q "Java_com_kentaakakashi_memorygg_MainActivity_nativeScanFirst" "$RUNNER_TEMP/controller-symbols.txt"
+          grep -q "Java_com_kentaakakashi_memorygg_agenthost_AgentHostService_nativeScanFirst" "$RUNNER_TEMP/agenthost-symbols.txt"
+          grep -q "Java_com_kentaakakashi_memorygg_agenthost_AgentHostService_nativeWriteValue" "$RUNNER_TEMP/agenthost-symbols.txt"
+          grep -q "Java_com_kentaakakashi_memorygg_agenthost_AgentHostActivity_nativeGetTestValue" "$RUNNER_TEMP/agenthost-symbols.txt"
+          echo "Controller and target-agent JNI entry points are present."
 
-      - name: Upload APK
+      - name: Stage APKs
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/MemoryGG-controller-debug.apk
+          cp agenthost/build/outputs/apk/debug/agenthost-debug.apk dist/MemoryGG-agent-host-debug.apk
+
+      - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
-          name: MemoryGG-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: MemoryGG-rootless-test-apks
+          path: dist/*.apk
           if-no-files-found: error
           retention-days: 14
