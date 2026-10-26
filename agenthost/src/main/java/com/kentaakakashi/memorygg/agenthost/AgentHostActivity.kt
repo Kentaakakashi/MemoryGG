@@ -47,7 +47,7 @@ class AgentHostActivity : Activity() {
         })
         root.addView(TextView(this).apply {
             text = pairingToken
-            isTextSelectable = true
+            setTextIsSelectable(true)
             textSize = 14f
             setTextColor(Color.WHITE)
             setPadding(12, 12, 12, 12)
