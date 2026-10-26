@@ -58,6 +58,20 @@ jobs:
           grep -q "Java_com_kentaakakashi_memorygg_agenthost_AgentHostActivity_nativeGetTestValue" "$RUNNER_TEMP/agenthost-symbols.txt"
           echo "Controller and target-agent JNI entry points are present."
 
+      - name: Validate rootless target integration contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'android:name=".AgentHostService"' agenthost/src/main/AndroidManifest.xml
+          grep -q 'android:exported="true"' agenthost/src/main/AndroidManifest.xml
+          grep -q 'override fun authorize(token: String)' agenthost/src/main/java/com/kentaakakashi/memorygg/agenthost/AgentHostService.kt
+          grep -q 'MessageDigest.isEqual' agenthost/src/main/java/com/kentaakakashi/memorygg/agenthost/AgentHostService.kt
+          grep -q 'nativeScanFirst' agenthost/src/main/cpp/agent-host-jni.cpp
+          grep -q 'nativeWriteValue' agenthost/src/main/cpp/agent-host-jni.cpp
+          grep -q 'Rootless game integration' README.md
+          test -f docs/ROOTLESS_APK_INTEGRATION.md
+          echo "Rootless in-process target contract checks passed."
+
       - name: Stage APKs
         run: |
           mkdir -p dist
