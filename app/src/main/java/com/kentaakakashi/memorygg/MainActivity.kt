@@ -66,7 +66,7 @@ class MainActivity : Activity() {
                     appendDiagnostic("Agent pairing failed: " + auth)
                     status.text = auth
                     if (agentBound) {
-                        try { unbindService(this@MainActivity.agentConnection) } catch (_: Throwable) { }
+                        try { unbindService(this) } catch (_: Throwable) { }
                         agentBound = false
                     }
                 }
