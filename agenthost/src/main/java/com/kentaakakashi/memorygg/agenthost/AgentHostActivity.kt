@@ -6,6 +6,8 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Color
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.Process
 import android.view.Gravity
 import android.widget.Button
@@ -16,6 +18,16 @@ import java.security.SecureRandom
 class AgentHostActivity : Activity() {
     private lateinit var valueLabel: TextView
     private lateinit var pairingToken: String
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private val liveValueRefresh = object : Runnable {
+        override fun run() {
+            if (::valueLabel.isInitialized) {
+                valueLabel.text = "Native probe value: " + nativeGetTestValue()
+                valueLabel.contentDescription = "Live native probe value " + nativeGetTestValue()
+            }
+            uiHandler.postDelayed(this, 250L)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -99,6 +111,17 @@ class AgentHostActivity : Activity() {
             setPadding(0, 18, 0, 0)
         })
         setContentView(root)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        uiHandler.removeCallbacks(liveValueRefresh)
+        uiHandler.post(liveValueRefresh)
+    }
+
+    override fun onPause() {
+        uiHandler.removeCallbacks(liveValueRefresh)
+        super.onPause()
     }
 
     private fun changeValue(delta: Int) {
