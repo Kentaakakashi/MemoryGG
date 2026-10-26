@@ -6,7 +6,6 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
-import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Bundle
 import android.os.IBinder
@@ -20,7 +19,6 @@ import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import org.json.JSONObject
-import rikka.shizuku.Shizuku
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -45,7 +43,6 @@ class MainActivity : Activity() {
     private val scanExecutor = Executors.newSingleThreadExecutor()
     private val frozen = ConcurrentHashMap<Long, Pair<String, Int>>()
     private val displayedMatches = mutableListOf<ScanMatch>()
-    private var serviceBound = false
 
     private val agentConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
@@ -92,47 +89,8 @@ class MainActivity : Activity() {
         }, 150, 150, TimeUnit.MILLISECONDS)
     }
 
-    private val permissionListener = Shizuku.OnRequestPermissionResultListener { code, result ->
-        if (code == REQUEST_CODE) {
-            appendDiagnostic("Shizuku permission: " +
-                if (result == PackageManager.PERMISSION_GRANTED) "GRANTED" else "DENIED")
-            refreshShizukuState()
-        }
-    }
-
-    private val userServiceArgs by lazy {
-        Shizuku.UserServiceArgs(
-            ComponentName(BuildConfig.APPLICATION_ID, MemoryUserService::class.java.name)
-        ).daemon(false)
-            .processNameSuffix("memorygg-diagnostics")
-            .debuggable(BuildConfig.DEBUG)
-            .version(BuildConfig.VERSION_CODE)
-    }
-
-    private val userServiceConnection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName, binder: IBinder) {
-            serviceBound = true
-            val report = try {
-                if (!binder.pingBinder()) "Invalid Shizuku UserService binder."
-                else IUserService.Stub.asInterface(binder).getDiagnostics(android.os.Process.myPid())
-            } catch (t: Throwable) {
-                "UserService failed: " + t.javaClass.simpleName + ": " + t.message
-            }
-            runOnUiThread {
-                appendDiagnostic("== Shizuku UserService ==")
-                report.lineSequence().forEach { appendDiagnostic(it) }
-                appendDiagnostic("External game RAM is not scanned by this build. The scanner UI operates in MemoryGG itself.")
-            }
-        }
-        override fun onServiceDisconnected(name: ComponentName) {
-            serviceBound = false
-            runOnUiThread { appendDiagnostic("Shizuku UserService disconnected.") }
-        }
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Shizuku.addRequestPermissionResultListener(permissionListener)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -151,7 +109,7 @@ class MainActivity : Activity() {
             setPadding(0, 0, 0, 8)
         })
         root.addView(TextView(this).apply {
-            text = "CURRENT MODE: in-process only. Your phone denied Shizuku shell access to other apps' RAM. Target-app agent/patching is still required for game memory."
+            text = "Rootless mode: connect to an app containing the MemoryGG agent. Without a connected agent, scans only cover MemoryGG itself."
             textSize = 12f
             setTextColor(Color.rgb(255, 209, 135))
             setPadding(10, 9, 10, 9)
@@ -254,10 +212,6 @@ class MainActivity : Activity() {
                 setOnClickListener { resetScan() }
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.7f))
             addView(Button(this@MainActivity).apply {
-                text = "Shizuku"
-                setOnClickListener { requestShizukuPermission() }
-            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.8f))
-            addView(Button(this@MainActivity).apply {
                 text = "Diagnostics"
                 setOnClickListener { runDiagnostics() }
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
@@ -283,7 +237,6 @@ class MainActivity : Activity() {
         root.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         root.addView(diagnostics, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         setContentView(root)
-        refreshShizukuState()
     }
 
     private fun toggleAgentConnection() {
@@ -484,47 +437,23 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun requestShizukuPermission() {
-        try {
-            if (!Shizuku.pingBinder()) appendDiagnostic("Shizuku is not connected. Start it using Wireless debugging.")
-            else if (Shizuku.isPreV11()) appendDiagnostic("Shizuku API v11 or newer is required.")
-            else Shizuku.requestPermission(REQUEST_CODE)
-        } catch (t: Throwable) {
-            appendDiagnostic("Permission request failed: " + t.javaClass.simpleName + ": " + t.message)
-        }
-    }
-
     private fun runDiagnostics() {
         appendDiagnostic("== MemoryGG diagnostics ==")
-        appendDiagnostic("App UID: " + android.os.Process.myUid())
-        appendDiagnostic("App PID: " + android.os.Process.myPid())
-        appendDiagnostic("Native self-test: " + nativeSelfTest())
-        if (!Shizuku.pingBinder()) { appendDiagnostic("Shizuku: NOT CONNECTED."); return }
-        if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-            appendDiagnostic("Shizuku connected but permission is not granted. Tap Shizuku.")
+        appendDiagnostic("Controller UID: " + android.os.Process.myUid())
+        appendDiagnostic("Controller PID: " + android.os.Process.myPid())
+        appendDiagnostic("Local native self-test: " + nativeSelfTest())
+        val agent = agentService
+        if (agent == null) {
+            appendDiagnostic("Target agent: not connected; scan/edit uses this controller process only.")
             return
         }
-        appendDiagnostic("Shizuku binder and permission: PASS")
-        if (Shizuku.getVersion() < 10) { appendDiagnostic("UserService requires Shizuku API 10+."); return }
-        if (serviceBound) { appendDiagnostic("UserService already connected."); return }
         try {
-            serviceBound = true
-            Shizuku.bindUserService(userServiceArgs, userServiceConnection)
+            appendDiagnostic("Target info: " + agent.getInfo())
+            appendDiagnostic("Target native self-test: " + agent.selfTest())
+            refreshProbeDisplay()
         } catch (t: Throwable) {
-            serviceBound = false
-            appendDiagnostic("UserService start failed: " + t.javaClass.simpleName + ": " + t.message)
+            appendDiagnostic("Target diagnostics failed: " + t.javaClass.simpleName + ": " + t.message)
         }
-    }
-
-    private fun refreshShizukuState() {
-        val state = try {
-            when {
-                !Shizuku.pingBinder() -> "NOT CONNECTED"
-                Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED -> "CONNECTED; permission granted"
-                else -> "CONNECTED; permission not granted"
-            }
-        } catch (t: Throwable) { "Unavailable: " + t.javaClass.simpleName + ": " + t.message }
-        appendDiagnostic("Shizuku status: " + state)
     }
 
     private fun appendDiagnostic(line: String) {
@@ -535,11 +464,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         agentService = null
         if (agentBound) { try { unbindService(agentConnection) } catch (_: Throwable) { }; agentBound = false }
-        Shizuku.removeRequestPermissionResultListener(permissionListener)
-        if (serviceBound) {
-            try { Shizuku.unbindUserService(userServiceArgs, userServiceConnection, true) } catch (_: Throwable) { }
-            serviceBound = false
-        }
+
         frozen.clear()
         freezeExecutor.shutdownNow()
         scanExecutor.shutdownNow()
@@ -555,7 +480,6 @@ class MainActivity : Activity() {
     private external fun nativeClearScan()
 
     companion object {
-        private const val REQUEST_CODE = 1001
         private const val AGENT_SERVICE_CLASS = "com.kentaakakashi.memorygg.agenthost.AgentHostService"
         init { System.loadLibrary("memorygg") }
     }
