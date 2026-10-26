@@ -11,7 +11,7 @@ Java_com_kentaakakashi_memorygg_agenthost_AgentHostService_nativeScanFirst(JNIEn
 }
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_kentaakakashi_memorygg_agenthost_AgentHostService_nativeScanNext(JNIEnv* e, jobject o, jstring v, jint t, jint c) {
-    return Java_com_kentaakashi_memorygg_MainActivity_nativeScanNext(e, o, v, t, c);
+    return Java_com_kentaakakashi_memorygg_MainActivity_nativeScanNext(e, o, v, t, c);
 }
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_kentaakakashi_memorygg_agenthost_AgentHostService_nativeWriteValue(JNIEnv* e, jobject o, jlong a, jstring v, jint t) {
