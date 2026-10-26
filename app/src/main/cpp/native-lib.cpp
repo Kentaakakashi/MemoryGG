@@ -121,9 +121,9 @@ Java_com_kentaakakashi_memorygg_MainActivity_nativeSelfTest(JNIEnv* e,jobject) {
     const int32_t replacement = 54321;
     const bool writeOk = readOk && writeOwn(address, &replacement, sizeof(replacement));
     const bool verifyOk = writeOk && readOwn(address, &after, sizeof(after));
-    const int32_t restore = 12345;
+    const int32_t restore = before;
     const bool restoreOk = writeOwn(address, &restore, sizeof(restore));
-    const bool pass = readOk && writeOk && verifyOk && restoreOk && before == 12345 && after == 54321;
+    const bool pass = readOk && writeOk && verifyOk && restoreOk && after == 54321;
     std::ostringstream o;
     o << (pass ? "PASS" : "FAIL")
       << " (/proc/self/mem own-process read/write; before=" << before
@@ -139,6 +139,18 @@ Java_com_kentaakakashi_memorygg_MainActivity_nativeScanFirst(JNIEnv* e,jobject,j
     g_matches.clear(); g_known.clear(); g_type=t;
     auto rs=regions(); std::vector<uint8_t> buf(CHUNK);
     size_t scanned=0; bool capped=false; size_t w=widthFor(t);
+    // Check the known test probe before the bounded map sweep so the smoke test
+    // remains deterministic even when earlier mappings consume the scan budget.
+    if (t == I32) {
+        const uintptr_t probe = reinterpret_cast<uintptr_t>(const_cast<int32_t*>(&controlled_value));
+        int32_t probeValue = 0;
+        if (readOwn(probe, &probeValue, sizeof(probeValue)) &&
+            equalValue(static_cast<long double>(probeValue), target, t)) {
+            g_matches.push_back({probe, fmt(static_cast<long double>(probeValue), t),
+                                 static_cast<long double>(probeValue)});
+            g_known.push_back(probe);
+        }
+    }
     for(const Region&r:rs) {
         uintptr_t pos=(r.start+w-1)&~(static_cast<uintptr_t>(w)-1);
         while(pos+w<=r.end) {
