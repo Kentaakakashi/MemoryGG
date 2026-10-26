@@ -11,6 +11,10 @@ MemoryGG uses a controller plus an in-process native agent. It no longer depends
 
 The first target is a test host, not arbitrary installed games. A game must explicitly contain or load the agent before the bridge can inspect its process. This does not bypass Android's sandbox for apps that have not integrated the agent. Rootless APK injection and compatibility research are later milestones.
 
+## Rootless game integration (Path A)
+
+Read the [integration guide](docs/ROOTLESS_APK_INTEGRATION.md) for the supported architecture, required target-app pieces, compatibility limits, and validation sequence. The current APK is a test harness; it is not yet a repackager for arbitrary games.
+
 ## Test the agent bridge
 
 1. Open the successful [GitHub Actions run](https://github.com/Kentaakakashi/MemoryGG/actions/runs/40281172210) and download the `MemoryGG-rootless-test-apks` artifact.
